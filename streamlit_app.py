@@ -5,7 +5,7 @@ import threading
 import asyncio
 
 # 设置页面
-st.set_page_config(page_title="girl-show", layout="wide")
+st.set_page_config(page_title="Honey-Girl", layout="wide")
 
 # UI 控制状态
 if "running" not in st.session_state:
@@ -14,7 +14,7 @@ if "running" not in st.session_state:
     st.session_state.sub = ""
     st.session_state.argo = ""
 
-st.title("🌐 girl-show")
+st.title("🌐 Honey-Girl")
 
 # 环境变量
 envs = {
