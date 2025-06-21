@@ -77,13 +77,19 @@ if st.button("🚀 启动部署"):
 if log_buffer:
     st.text_area("📄 部署日志输出", value="\n".join(log_buffer), height=300)
 
-# 展示视频
+# 视频合集
 video_paths = ["./meinv.mp4", "./mv2.mp4"]
 for path in video_paths:
     if os.path.exists(path):
         st.video(path)
 
-# 展示图片
+# 图片展示
 image_path = "./mv.jpg"
 if os.path.exists(image_path):
     st.image(image_path, caption="南音", use_container_width=True)
+
+# ✅ 插入 CCTV6 直播流
+st.markdown("---")
+st.header("📺 CCTV-6 电影频道直播")
+st.video("http://ottrrs.hl.chinamobile.com/PLTV/88888888/224/3221226010/index.m3u8")
+st.caption("🎬 来自中国移动直播源 · 若无法播放请稍后重试")
