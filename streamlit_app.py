@@ -2,7 +2,7 @@ import os
 import subprocess
 import streamlit as st
 import threading
-import time # 导入 time 模块用于延时
+import time
 
 # 设置页面
 st.set_page_config(page_title="Honey-Girl", layout="wide")
@@ -11,7 +11,10 @@ st.set_page_config(page_title="Honey-Girl", layout="wide")
 if "running" not in st.session_state:
     st.session_state.running = False
     st.session_state.logs = ""
-    st.session_state.process = None # 用于存储子进程对象
+    # 注意：如果你的代码不再使用 sub 和 argo，可以考虑移除它们，保持代码整洁
+    st.session_state.sub = ""
+    st.session_state.argo = ""
+    st.session_state.process = None # **关键修复：初始化 process 状态变量**
 
 st.title("🌐 Honey-Girl")
 
