@@ -2,62 +2,21 @@ import os
 import subprocess
 import streamlit as st
 import threading
-import time
-import sys # 用于捕获标准输出和标准错误
-import io  # 用于捕获标准输出和标准错误
+import asyncio
+import time # 导入 time 模块用于延时，如果需要日志刷新
 
-# --- 1. 确保依赖安装 (在Streamlit应用启动时执行，避免重复安装) ---
-# 这是一个临时的解决方案，因为你没有使用 Dockerfile。
-# 在生产环境中，更推荐在部署前通过 Dockerfile 或 CI/CD 脚本来完成依赖安装。
-# 这里我们尝试在每次应用启动时执行一次，但会检查是否已成功安装。
-
-# 使用一个会话状态来标记是否已经尝试过安装依赖
-if "dependencies_installed" not in st.session_state:
-    st.session_state.dependencies_installed = False
-
-if not st.session_state.dependencies_installed:
-    st.info("⚙️ 首次启动：正在安装或检查Python依赖 (requirements.txt)...")
-    try:
-        # 尝试安装依赖，捕获其输出
-        # 注意：这里捕获的输出不会直接显示在 Streamlit UI 上，但可以在后台日志中查看
-        install_result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            capture_output=True, text=True, check=True, encoding='utf-8'
-        )
-        st.session_state.logs += "✅ 依赖安装成功:\n" + install_result.stdout
-        if install_result.stderr:
-            st.session_state.logs += "⚠️ 依赖安装警告/错误:\n" + install_result.stderr
-        st.session_state.dependencies_installed = True
-        st.success("✅ Python依赖安装/检查完成。")
-    except subprocess.CalledProcessError as e:
-        st.session_state.logs += f"\n❌ 依赖安装失败:\n{e.stdout}\n{e.stderr}"
-        st.error("❌ 依赖安装失败，请检查 requirements.txt 和日志。")
-        st.stop() # 依赖安装失败，停止应用加载
-    except Exception as e:
-        st.session_state.logs += f"\n❌ 依赖安装过程中发生未知错误: {e}"
-        st.error("❌ 依赖安装过程中发生未知错误，停止应用加载。")
-        st.stop()
-    # 强制刷新一次，显示依赖安装结果
-    st.rerun()
-
-# --- 2. Streamlit 应用页面配置和初始化 ---
-st.set_page_config(page_title="Honey-Girl", layout="wide")
+# 设置页面
+st.set_page_config(page_title="girl-show", layout="wide")
 
 # UI 控制状态
 if "running" not in st.session_state:
     st.session_state.running = False
-    st.session_state.logs = "" # 用于显示所有日志
-    st.session_state.backend_process_pid = None # 存储 app.py 进程的 PID
-    # 如果你的 app.py 仍然使用这些变量，请保留
+    st.session_state.logs = ""
     st.session_state.sub = ""
     st.session_state.argo = ""
-    # 用于捕获 app.py 实时输出的缓冲区和线程
-    st.session_state.stdout_buffer = io.StringIO()
-    st.session_state.stderr_buffer = io.StringIO()
-    st.session_state.stdout_reader_thread = None
-    st.session_state.stderr_reader_thread = None
+    st.session_state.backend_process = None # <--- **新增：初始化用于存储进程的变量**
 
-st.title("🌐 Honey-Girl")
+st.title("🌐 girl-show")
 
 # 环境变量
 envs = {
@@ -68,138 +27,95 @@ envs = {
     "NEZHA_KEY": st.secrets.get("NEZHA_KEY", ""),
     "NEZHA_PORT": st.secrets.get("NEZHA_PORT", ""),
     "NEZHA_SERVER": st.secrets.get("NEZHA_SERVER", ""),
+    "UPLOAD_URL": st.secrets.get("UPLOAD_URL", "")
 }
 
 # 写出 .env 文件
-# 注意：在 Streamlit Cloud 等生产环境中，st.secrets 更推荐用于敏感信息
 with open("./env.sh", "w") as shell_file:
     shell_file.write("#!/bin/bash\n")
     for k, v in envs.items():
-        os.environ[k] = v # 设置系统环境变量
+        os.environ[k] = v  # 设置系统环境变量
         shell_file.write(f"export {k}='{v}'\n")
 
-# --- 3. 后端服务启动和监控逻辑 ---
-
-# 启动 app.py 并实时捕获其输出的函数
-def run_and_monitor_backend():
-    # 检查进程是否已在运行
-    if st.session_state.backend_process_pid:
-        try:
-            os.kill(st.session_state.backend_process_pid, 0)
-            # 进程仍在运行，不重复启动
-            # st.session_state.logs += "\n后端服务已经在运行中 (PID: {}).".format(st.session_state.backend_process_pid)
-            st.session_state.running = True
-            return # 已在运行，直接返回
-        except OSError:
-            # 进程不存在或已终止，需要重新启动
-            st.session_state.logs += "\n检测到后端服务 (PID: {}) 已停止或不存在，尝试重新启动。".format(st.session_state.backend_process_pid)
-            st.session_state.backend_process_pid = None
-            st.session_state.running = False
-
-    st.session_state.logs += "\n⚙️ 正在尝试启动后端服务 (app.py)...\n"
+# 构造命令（去掉 screen，使用 subprocess.Popen 兼容 streamlit 平台）
+def run_backend():
     try:
-        # 赋予 app.py 执行权限 (这行也可以移除，如果 app.py 不需要执行权限)
+        # 检查后端服务是否已经在运行
+        # 注意：这里假设 st.session_state.backend_process 存储的是 Popen 对象
+        if st.session_state.backend_process and st.session_state.backend_process.poll() is None:
+            st.session_state.logs += "\n⚠️ 后端服务已在运行中，无需重复启动。"
+            st.session_state.running = True # 确保状态是运行中
+            return
+
+        st.session_state.logs += "⚙️ 正在安装依赖并启动后端服务...\n"
+        st.session_state.running = True # 标记为正在尝试启动
+        st.rerun() # 强制 Streamlit 刷新以显示最新日志
+
+        # 赋予执行权限
+        st.session_state.logs += "chmod +x app.py ...\n"
         subprocess.run("chmod +x app.py", shell=True, check=True, capture_output=True, text=True)
         st.session_state.logs += "✅ chmod +x app.py 完成\n"
 
-        # 使用 Popen 后台启动 app.py
-        # IMPORTANT: 我们在这里捕获 stdout/stderr，并使用线程读取
-        process = subprocess.Popen(
-            [sys.executable, "app.py"], # 使用当前 Streamlit 进程的 Python 解释器
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1 # 行缓冲
-        )
-        st.session_state.backend_process_pid = process.pid
+        # 安装依赖
+        st.session_state.logs += "pip install -r requirements.txt ...\n"
+        install_result = subprocess.run("pip install -r requirements.txt", shell=True, check=True, capture_output=True, text=True)
+        st.session_state.logs += install_result.stdout
+        st.session_state.logs += "✅ 依赖安装完成\n"
+
+        # 启动 app.py 后台运行，并将 Popen 对象存储到 session_state
+        # 注意：为了让 Streamlit 捕获到 app.py 的输出，通常需要将其重定向
+        # 但你之前的代码没有重定向，如果它能工作，说明你的部署环境有特殊处理
+        # 否则，可能需要像我之前那样用 PIPE 捕获。我们这里先保持原样。
+        process = subprocess.Popen(["python", "app.py"])
+        st.session_state.backend_process = process # <--- **存储 Popen 对象**
         st.session_state.logs += f"✅ 后端服务已成功启动 (PID: {process.pid})！\n"
-        st.session_state.running = True
+        # st.session_state.running = False # <--- **这里应该保持 True，表示运行中**
+        st.session_state.running = True # 启动成功，设为 True
+        st.rerun() # 再次刷新以显示最终状态
 
-        # 启动线程来实时读取 app.py 的 stdout 和 stderr
-        def reader(pipe, buffer):
-            for line in iter(pipe.readline, ''): # 持续读取直到 EOF
-                buffer.write(line)
-            pipe.close()
-
-        st.session_state.stdout_reader_thread = threading.Thread(
-            target=reader, args=(process.stdout, st.session_state.stdout_buffer), daemon=True
-        )
-        st.session_state.stderr_reader_thread = threading.Thread(
-            target=reader, args=(process.stderr, st.session_state.stderr_buffer), daemon=True
-        )
-
-        st.session_state.stdout_reader_thread.start()
-        st.session_state.stderr_reader_thread.start()
-
-    except subprocess.CalledProcessError as e:
-        st.session_state.logs += f"\n❌ 命令执行出错: {e}\n"
-        st.session_state.logs += f"stdout:\n{e.stdout}\n"
-        st.session_state.logs += f"stderr:\n{e.stderr}\n"
-        st.session_state.running = False
-        st.session_state.backend_process_pid = None
     except Exception as e:
-        st.session_state.logs += f"\n❌ 启动过程中出现未知错误: {e}\n"
-        st.session_state.logs += f"\n请确保 app.py 路径正确且可执行，或检查其内部是否有语法错误。"
-        st.session_state.running = False
-        st.session_state.backend_process_pid = None
+        st.session_state.logs += f"\n❌ 出错: {e}"
+        st.session_state.running = False # 启动失败，设为 False
+        st.session_state.backend_process = None # 清空进程对象
+        st.rerun() # 刷新显示错误
 
-# --- 4. Streamlit 应用主循环和 UI 更新 ---
+# 定义异步主函数 (用于包装 run_backend，以便在线程中运行 asyncio.run)
+async def main():
+    run_backend() # 直接调用同步函数
 
+# --- 自动启动部署逻辑 (替换了原来的按钮) ---
 # 每次 Streamlit 脚本运行时，检查并启动/监控后端服务
 if not st.session_state.running:
-    # 只有在依赖安装完成后才尝试启动后端服务
-    if st.session_state.dependencies_installed:
-        run_and_monitor_backend()
-    else:
-        # 如果依赖还没安装好，就等待下一次 rerun
-        pass # 上面已经通过 st.rerun() 强制刷新了
-
-# 实时更新日志显示
-# 从缓冲区获取新日志
-st.session_state.logs += st.session_state.stdout_buffer.getvalue()
-st.session_state.stdout_buffer.truncate(0) # 清空已读取部分
-st.session_state.stdout_buffer.seek(0)    # 重置文件指针
-
-st.session_state.logs += st.session_state.stderr_buffer.getvalue()
-st.session_state.stderr_buffer.truncate(0)
-st.session_state.stderr_buffer.seek(0)
-
-# 检查后端进程状态
-if st.session_state.backend_process_pid:
-    try:
-        # 尝试发送信号0，检查进程是否存在
-        os.kill(st.session_state.backend_process_pid, 0)
-        st.session_state.running = True
-        st.success(f"✅ 后端服务正在运行中 (PID: {st.session_state.backend_process_pid}).")
-    except OSError:
-        # 进程已终止
-        st.session_state.logs += f"\n后端服务 (PID: {st.session_state.backend_process_pid}) 已终止。"
-        st.session_state.backend_process_pid = None
-        st.session_state.running = False
-        st.error("❌ 后端服务已停止。")
-else:
-    if st.session_state.dependencies_installed: # 只有在依赖安装成功后才显示停止状态
-        st.error("❌ 后端服务未运行。")
-
-# 为了让日志实时更新，每隔一段时间自动刷新 Streamlit 应用
-# 确保在运行中才刷新，避免不必要的循环
-if st.session_state.running:
-    time.sleep(1) # 每秒刷新一次，以获取新日志和检查进程状态
+    st.warning("🔄 正在初始化和启动后端服务，请稍候...")
+    # 在新的线程中启动 main，daemon=True 确保线程随主程序退出而退出
+    threading.Thread(target=lambda: asyncio.run(main()), daemon=True).start()
+    # 立即强制刷新，显示“正在初始化”信息
     st.rerun()
+else:
+    # 检查进程是否仍然存活
+    if st.session_state.backend_process and st.session_state.backend_process.poll() is None:
+        st.success("✅ 后端服务已在运行中。")
+    else:
+        # 如果 session_state.running 是 True 但进程已退出，则重置状态
+        st.session_state.running = False
+        st.session_state.backend_process = None
+        st.error("❌ 后端服务已停止，尝试刷新页面重新启动。")
+        # 强制刷新一次，触发重新启动尝试
+        st.rerun()
 
-# --- 5. UI 内容显示 (保持不变) ---
+# --- 日志显示 ---
 st.subheader("部署日志")
+# 注意：如果 app.py 的输出没有显示在这里，需要考虑重定向其输出到文件，然后这里读取
+# 或者在 subprocess.Popen 中使用 stdout=subprocess.PIPE 来捕获
 st.code(st.session_state.logs, language="bash", height=300)
 
-# 展示视频
-# 检查是否存在，假设文件名是 meinv.mp4
+# --- 展示视频和图片 ---
 video_paths = ["./meinv.mp4", "./mv2.mp4"]
 for path in video_paths:
     if os.path.exists(path):
         st.video(path)
 
-# 展示图片
 image_path = "./mv.jpg"
 if os.path.exists(image_path):
-    st.image(image_path, caption="南音", use_container_width=True)
+    st.image(image_path, caption="林熳", use_container_width=True)
 
