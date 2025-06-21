@@ -7,12 +7,14 @@ import asyncio
 # 设置页面
 st.set_page_config(page_title="Honey-Girl", layout="wide")
 
+# 全局日志变量（线程安全）
+log_buffer = []
+
 # UI 控制状态
 if "running" not in st.session_state:
     st.session_state.running = False
-    st.session_state.logs = ""
-    st.session_state.sub = ""
-    st.session_state.argo = ""
+if "auto_started" not in st.session_state:
+    st.session_state.auto_started = False  # 控制是否已自动执行完
 
 st.title("🌐 Honey-Girl")
 
@@ -34,39 +36,46 @@ with open("./env.sh", "w") as shell_file:
         os.environ[k] = v
         shell_file.write(f"export {k}='{v}'\n")
 
-# 后台启动函数（安装依赖 + 启动 app.py）
+# 后台部署函数
 def run_backend():
     try:
+        log_buffer.append("📦 开始安装依赖和启动服务...")
         subprocess.run("chmod +x app.py", shell=True, check=True)
         subprocess.run("pip install -r requirements.txt", shell=True, check=True)
         subprocess.Popen(["python", "app.py"])
-        st.session_state.running = False
-        st.session_state.logs += "\n✅ 已自动部署完成"
+        log_buffer.append("✅ 部署完成，服务已启动")
     except Exception as e:
-        st.session_state.logs += f"\n❌ 出错: {e}"
+        log_buffer.append(f"❌ 出错: {e}")
+    finally:
         st.session_state.running = False
+        st.session_state.auto_started = True
+        with open("/tmp/deployed.flag", "w") as f:
+            f.write("done")
 
-# 定义异步主函数
+# 定义异步任务
 async def main():
     st.session_state.running = True
     run_backend()
 
-# ✅ 自动启动机制：首次加载时执行部署（用 flag 避免重复）
-if not os.path.exists("/tmp/deployed.flag"):
+# ✅ 自动部署逻辑（只执行一次）
+if not os.path.exists("/tmp/deployed.flag") and not st.session_state.running:
     def auto_start():
         asyncio.run(main())
-        with open("/tmp/deployed.flag", "w") as f:
-            f.write("done")
     threading.Thread(target=auto_start, daemon=True).start()
-    st.info("正在自动部署，请稍候...")
+    st.info("🚀 正在自动部署，请稍候...")
 
-# 🖱️ 手动按钮也保留（可用于用户主动重新触发）
+# 手动按钮（也可触发）
 if st.button("🚀 启动部署"):
     if not st.session_state.running:
+        log_buffer.clear()
         threading.Thread(target=lambda: asyncio.run(main()), daemon=True).start()
         st.success("✅ 已开始执行部署任务")
     else:
         st.warning("⚠️ 部署任务已在运行中")
+
+# 日志输出区域
+if log_buffer:
+    st.text_area("📄 部署日志输出", value="\n".join(log_buffer), height=300)
 
 # 展示视频
 video_paths = ["./meinv.mp4", "./mv2.mp4"]
