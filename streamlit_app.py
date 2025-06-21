@@ -3,10 +3,10 @@ import subprocess
 import streamlit as st
 import threading
 import asyncio
-import time # 导入 time 模块用于延时，如果需要日志刷新
+import time # 导入 time 模块用于延时
 
 # 设置页面
-st.set_page_config(page_title="girl-show", layout="wide")
+st.set_page_config(page_title="Honey-Girl", layout="wide")
 
 # UI 控制状态
 if "running" not in st.session_state:
@@ -14,9 +14,9 @@ if "running" not in st.session_state:
     st.session_state.logs = ""
     st.session_state.sub = ""
     st.session_state.argo = ""
-    st.session_state.backend_process = None # <--- **新增：初始化用于存储进程的变量**
+    st.session_state.process = None # 用于存储子进程对象
 
-st.title("🌐 girl-show")
+st.title("🌐 Honey-Girl")
 
 # 环境变量
 envs = {
@@ -27,7 +27,6 @@ envs = {
     "NEZHA_KEY": st.secrets.get("NEZHA_KEY", ""),
     "NEZHA_PORT": st.secrets.get("NEZHA_PORT", ""),
     "NEZHA_SERVER": st.secrets.get("NEZHA_SERVER", ""),
-    "UPLOAD_URL": st.secrets.get("UPLOAD_URL", "")
 }
 
 # 写出 .env 文件
@@ -39,18 +38,17 @@ with open("./env.sh", "w") as shell_file:
 
 # 构造命令（去掉 screen，使用 subprocess.Popen 兼容 streamlit 平台）
 def run_backend():
+    if st.session_state.process and st.session_state.process.poll() is None:
+        # 如果进程已经在运行，则不重复启动
+        st.session_state.logs += "\n后端服务已在运行中，无需重复启动。"
+        st.session_state.running = True
+        return
+
+    st.session_state.running = True
+    st.session_state.logs = "⚙️ 正在安装依赖并启动后端服务...\n"
+    st.rerun() # 强制 Streamlit 刷新以显示最新日志
+
     try:
-        # 检查后端服务是否已经在运行
-        # 注意：这里假设 st.session_state.backend_process 存储的是 Popen 对象
-        if st.session_state.backend_process and st.session_state.backend_process.poll() is None:
-            st.session_state.logs += "\n⚠️ 后端服务已在运行中，无需重复启动。"
-            st.session_state.running = True # 确保状态是运行中
-            return
-
-        st.session_state.logs += "⚙️ 正在安装依赖并启动后端服务...\n"
-        st.session_state.running = True # 标记为正在尝试启动
-        st.rerun() # 强制 Streamlit 刷新以显示最新日志
-
         # 赋予执行权限
         st.session_state.logs += "chmod +x app.py ...\n"
         subprocess.run("chmod +x app.py", shell=True, check=True, capture_output=True, text=True)
@@ -58,64 +56,63 @@ def run_backend():
 
         # 安装依赖
         st.session_state.logs += "pip install -r requirements.txt ...\n"
+        # 捕获依赖安装的输出
         install_result = subprocess.run("pip install -r requirements.txt", shell=True, check=True, capture_output=True, text=True)
         st.session_state.logs += install_result.stdout
         st.session_state.logs += "✅ 依赖安装完成\n"
 
-        # 启动 app.py 后台运行，并将 Popen 对象存储到 session_state
-        # 注意：为了让 Streamlit 捕获到 app.py 的输出，通常需要将其重定向
-        # 但你之前的代码没有重定向，如果它能工作，说明你的部署环境有特殊处理
-        # 否则，可能需要像我之前那样用 PIPE 捕获。我们这里先保持原样。
-        process = subprocess.Popen(["python", "app.py"])
-        st.session_state.backend_process = process # <--- **存储 Popen 对象**
-        st.session_state.logs += f"✅ 后端服务已成功启动 (PID: {process.pid})！\n"
-        # st.session_state.running = False # <--- **这里应该保持 True，表示运行中**
-        st.session_state.running = True # 启动成功，设为 True
-        st.rerun() # 再次刷新以显示最终状态
+        # 启动 app.py 后台运行，并将输出重定向
+        st.session_state.logs += "启动 python app.py ...\n"
+        # 使用 preexec_fn=os.setsid 来创建一个新的会话，防止父进程退出时子进程也退出
+        # 注意：在某些部署环境中，这种方式可能不适用，需要根据实际平台调整
+        process = subprocess.Popen(["python", "app.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        st.session_state.process = process
+        st.session_state.logs += "✅ 后端服务已成功启动！\n"
 
-    except Exception as e:
-        st.session_state.logs += f"\n❌ 出错: {e}"
-        st.session_state.running = False # 启动失败，设为 False
-        st.session_state.backend_process = None # 清空进程对象
-        st.rerun() # 刷新显示错误
+        # 持续读取子进程输出（非阻塞方式）
+        def read_output(proc):
+            for line in proc.stdout:
+                st.session_state.logs += line
+                time.sleep(0.01) # 避免更新过快
+            for line in proc.stderr:
+                st.session_state.logs += f"ERROR: {line}"
+                time.sleep(0.01)
 
-# 定义异步主函数 (用于包装 run_backend，以便在线程中运行 asyncio.run)
-async def main():
-    run_backend() # 直接调用同步函数
+        # 在新线程中读取输出，以免阻塞主线程
+        threading.Thread(target=read_output, args=(process,), daemon=True).start()
 
-# --- 自动启动部署逻辑 (替换了原来的按钮) ---
-# 每次 Streamlit 脚本运行时，检查并启动/监控后端服务
-if not st.session_state.running:
-    st.warning("🔄 正在初始化和启动后端服务，请稍候...")
-    # 在新的线程中启动 main，daemon=True 确保线程随主程序退出而退出
-    threading.Thread(target=lambda: asyncio.run(main()), daemon=True).start()
-    # 立即强制刷新，显示“正在初始化”信息
-    st.rerun()
-else:
-    # 检查进程是否仍然存活
-    if st.session_state.backend_process and st.session_state.backend_process.poll() is None:
-        st.success("✅ 后端服务已在运行中。")
-    else:
-        # 如果 session_state.running 是 True 但进程已退出，则重置状态
+    except subprocess.CalledProcessError as e:
+        st.session_state.logs += f"\n❌ 命令执行出错: {e}\n"
+        st.session_state.logs += f"stdout:\n{e.stdout}\n"
+        st.session_state.logs += f"stderr:\n{e.stderr}\n"
         st.session_state.running = False
-        st.session_state.backend_process = None
-        st.error("❌ 后端服务已停止，尝试刷新页面重新启动。")
-        # 强制刷新一次，触发重新启动尝试
-        st.rerun()
+    except Exception as e:
+        st.session_state.logs += f"\n❌ 启动过程中出现未知错误: {e}\n"
+        st.session_state.running = False
 
-# --- 日志显示 ---
+    st.rerun() # 再次刷新以显示最终状态
+
+# 检查是否已在运行，如果未运行则自动启动
+if not st.session_state.running:
+    # 使用线程来运行后端启动逻辑，避免阻塞 Streamlit UI
+    # 注意：在某些部署环境（如 Streamlit Cloud），直接在主线程中长时间运行 subprocess 可能导致应用超时。
+    # 使用 threading.Thread 是一个好的实践。
+    threading.Thread(target=run_backend, daemon=True).start()
+    st.warning("🔄 正在初始化和启动后端服务，请稍候...")
+else:
+    st.success("✅ 后端服务已在运行中。")
+
+# 显示日志
 st.subheader("部署日志")
-# 注意：如果 app.py 的输出没有显示在这里，需要考虑重定向其输出到文件，然后这里读取
-# 或者在 subprocess.Popen 中使用 stdout=subprocess.PIPE 来捕获
-st.code(st.session_state.logs, language="bash", height=300)
+st.code(st.session_state.logs, language="bash")
 
-# --- 展示视频和图片 ---
+# 展示视频
 video_paths = ["./meinv.mp4", "./mv2.mp4"]
 for path in video_paths:
     if os.path.exists(path):
         st.video(path)
 
+# 展示图片
 image_path = "./mv.jpg"
 if os.path.exists(image_path):
-    st.image(image_path, caption="林熳", use_container_width=True)
-
+    st.image(image_path, caption="南音", use_container_width=True)
