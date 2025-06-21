@@ -87,9 +87,3 @@ for path in video_paths:
 image_path = "./mv.jpg"
 if os.path.exists(image_path):
     st.image(image_path, caption="南音", use_container_width=True)
-
-# ✅ 插入 CCTV6 直播流
-st.markdown("---")
-st.header("📺 CCTV-6 电影频道直播")
-st.video("http://ottrrs.hl.chinamobile.com/PLTV/88888888/224/3221226010/index.m3u8")
-st.caption("🎬 来自中国移动直播源 · 若无法播放请稍后重试")
