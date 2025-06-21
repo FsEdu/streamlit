@@ -3,22 +3,22 @@ import subprocess
 import streamlit as st
 import threading
 import time
+import queue # Import queue for thread-safe communication
 
-# 设置页面
+# Set page configuration
 st.set_page_config(page_title="Honey-Girl", layout="wide")
 
-# UI 控制状态
+# UI control state initialization
 if "running" not in st.session_state:
     st.session_state.running = False
     st.session_state.logs = ""
-    # 注意：如果你的代码不再使用 sub 和 argo，可以考虑移除它们，保持代码整洁
-    st.session_state.sub = ""
-    st.session_state.argo = ""
-    st.session_state.process = None # **关键修复：初始化 process 状态变量**
+    st.session_state.process_started = False # New flag to indicate if app.py was attempted to start
+    st.session_state.process_output_queue = queue.Queue() # Thread-safe queue for logs
+    st.session_state.backend_process = None # Store the Popen object here
 
 st.title("🌐 Honey-Girl")
 
-# 环境变量 (保持不变)
+# Environment variables (unchanged)
 envs = {
     "BOT_TOKEN": st.secrets.get("BOT_TOKEN", ""),
     "CHAT_ID": st.secrets.get("CHAT_ID", ""),
@@ -29,93 +29,122 @@ envs = {
     "NEZHA_SERVER": st.secrets.get("NEZHA_SERVER", ""),
 }
 
-# 写出 .env 文件 (保持不变)
+# Write .env file (unchanged)
 with open("./env.sh", "w") as shell_file:
     shell_file.write("#!/bin/bash\n")
     for k, v in envs.items():
         os.environ[k] = v
         shell_file.write(f"export {k}='{v}'\n")
 
-# 构造命令（自动启动逻辑）
-def run_backend_and_install_deps():
-    if st.session_state.process and st.session_state.process.poll() is None:
-        st.session_state.logs += "\n后端服务已在运行中，无需重复启动。\n"
-        st.session_state.running = True
-        return
-
-    st.session_state.running = True
-    st.session_state.logs = "⚙️ 正在安装依赖并启动后端服务...\n"
-    st.rerun() # 强制 Streamlit 刷新以显示最新日志
-
+# Function to run backend in a separate thread
+# This function should NOT directly access st.session_state
+def start_backend_process(output_queue):
+    output_queue.put("⚙️ Starting backend process...\n")
     try:
-        # 赋予执行权限
-        st.session_state.logs += "chmod +x app.py ...\n"
+        # Give execute permission to app.py
+        output_queue.put("chmod +x app.py ...\n")
         subprocess.run("chmod +x app.py", shell=True, check=True, capture_output=True, text=True)
-        st.session_state.logs += "✅ chmod +x app.py 完成\n"
+        output_queue.put("✅ chmod +x app.py completed\n")
 
-        # **重要：在 Docker 环境中，依赖通常在 Dockerfile 构建阶段安装，所以这里可以移除或仅作为本地调试的备用**
-        # 但为了你目前的需求，我们暂时保留，但知道它可能在生产环境中是冗余的。
-        st.session_state.logs += "pip install -r requirements.txt ...\n"
-        install_result = subprocess.run("pip install -r requirements.txt", shell=True, check=True, capture_output=True, text=True)
-        st.session_state.logs += install_result.stdout
-        st.session_state.logs += "✅ 依赖安装完成\n"
+        # IMPORTANT: pip install -r requirements.txt should ideally be done in Dockerfile
+        # or before Streamlit starts. Running it repeatedly can be inefficient.
+        # For robustness, we will remove it here, assuming Dockerfile handles it.
+        # If you must run it here, ensure it only runs once per app lifecycle.
+        # output_queue.put("pip install -r requirements.txt ...\n")
+        # install_result = subprocess.run("pip install -r requirements.txt", shell=True, check=True, capture_output=True, text=True)
+        # output_queue.put(install_result.stdout)
+        # output_queue.put("✅ Dependencies installed (if not already by Dockerfile)\n")
 
-        # 启动 app.py 后台运行
-        st.session_state.logs += "启动 python app.py ...\n"
+
+        # Start app.py in background
+        output_queue.put("Starting python app.py ...\n")
+        # Store the Popen object directly in st.session_state from the main thread
+        # This is tricky because the Popen object is created in the thread.
+        # We need to return it or set it in a way the main thread can pick up.
+        # For now, let's keep it simple: the thread directly interacts with the process.
         process = subprocess.Popen(["python", "app.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-        st.session_state.process = process
-        st.session_state.logs += "✅ 后端服务已成功启动！\n"
+        output_queue.put("✅ Backend service successfully launched!\n")
 
-        # 持续读取子进程输出（非阻塞方式）
-        def read_output(proc):
-            while True: # 循环读取，直到进程结束
-                line = proc.stdout.readline()
-                if not line: # 如果没有更多输出，检查进程是否还活着
-                    if proc.poll() is not None: # 进程已结束
-                        break
-                    time.sleep(0.1) # 短暂等待
-                    continue
-                st.session_state.logs += line
-                st.rerun() # 实时更新日志
-                time.sleep(0.01) # 避免更新过快
+        # Read output continuously
+        while True:
+            stdout_line = process.stdout.readline()
+            stderr_line = process.stderr.readline()
 
-            # 进程结束后，读取剩余的错误输出
-            for line in proc.stderr:
-                st.session_state.logs += f"ERROR: {line}"
-                st.rerun()
-                time.sleep(0.01)
+            if stdout_line:
+                output_queue.put(stdout_line)
+            if stderr_line:
+                output_queue.put(f"ERROR: {stderr_line}")
 
-            st.session_state.logs += f"\nBackend process exited with code {proc.returncode}\n"
-            st.session_state.running = False
-            st.rerun() # 最后更新一次状态
+            if not stdout_line and not stderr_line and process.poll() is not None:
+                # Process has exited and no more output
+                break
+            time.sleep(0.05) # Small delay to prevent busy-waiting
 
-        # 在新线程中读取输出，以免阻塞主线程
-        threading.Thread(target=read_output, args=(process,), daemon=True).start()
-
+        output_queue.put(f"\nBackend process exited with code {process.returncode}\n")
+        # Mark as not running from the main thread's perspective later
+        output_queue.put("__PROCESS_EXITED__") # Special marker for main thread
     except subprocess.CalledProcessError as e:
-        st.session_state.logs += f"\n❌ 命令执行出错: {e}\n"
-        st.session_state.logs += f"stdout:\n{e.stdout}\n"
-        st.session_state.logs += f"stderr:\n{e.stderr}\n"
-        st.session_state.running = False
+        output_queue.put(f"\n❌ Command execution error: {e}\n")
+        output_queue.put(f"stdout:\n{e.stdout}\n")
+        output_queue.put(f"stderr:\n{e.stderr}\n")
+        output_queue.put("__PROCESS_EXITED_ERROR__")
     except Exception as e:
-        st.session_state.logs += f"\n❌ 启动过程中出现未知错误: {e}\n"
+        output_queue.put(f"\n❌ An unknown error occurred during startup: {e}\n")
+        output_queue.put("__PROCESS_EXITED_ERROR__")
+
+
+# --- Main Streamlit App Logic ---
+
+# Function to process queue and update session state
+def update_logs_from_queue():
+    while not st.session_state.process_output_queue.empty():
+        log_entry = st.session_state.process_output_queue.get()
+        if log_entry == "__PROCESS_EXITED__":
+            st.session_state.running = False
+            st.session_state.backend_process = None
+            st.session_state.logs += "\nBackend process has finished."
+        elif log_entry == "__PROCESS_EXITED_ERROR__":
+            st.session_state.running = False
+            st.session_state.backend_process = None
+            st.session_state.logs += "\nBackend process exited with an error."
+        else:
+            st.session_state.logs += log_entry
+    if st.session_state.backend_process and st.session_state.backend_process.poll() is not None and st.session_state.running:
+        # If the process finished but the state hasn't been updated yet
         st.session_state.running = False
+        st.session_state.backend_process = None
+        st.session_state.logs += "\nBackend process terminated unexpectedly."
 
-    st.rerun() # 再次刷新以显示最终状态
 
-# --- Streamlit 应用启动时的自动触发逻辑 ---
-# 检查是否已在运行，如果未运行则自动启动
-if not st.session_state.running:
-    st.warning("🔄 正在初始化和启动后端服务，请稍候...")
-    threading.Thread(target=run_backend_and_install_deps, daemon=True).start()
+# Check if the backend process needs to be started
+if not st.session_state.process_started: # Use a new flag for initial launch attempt
+    st.session_state.logs = "🔄 Attempting to start backend service...\n"
+    st.session_state.process_started = True # Mark that we've tried to start it
+    # Start the thread, passing the queue
+    threading.Thread(target=start_backend_process, args=(st.session_state.process_output_queue,), daemon=True).start()
+    st.warning("🔄 Initializing and starting backend service, please wait...")
+    st.session_state.running = True # Assume it's running until told otherwise
+
+# Periodically update logs from the queue
+update_logs_from_queue()
+
+# Rerun the Streamlit app periodically to update logs
+if st.session_state.running:
+    st.info("Backend service is running. Checking for updates...")
+    time.sleep(1) # Wait a bit before rerunning to avoid excessive refreshes
+    st.rerun() # This will re-execute the script and check the queue again
 else:
-    st.success("✅ 后端服务已在运行中。")
+    if st.session_state.process_started: # Only show success/failure after initial attempt
+        if st.session_state.backend_process is None: # Process has exited
+            st.error("❌ Backend service is not running or has terminated.")
+        else:
+            st.success("✅ Backend service is running (initialized).") # Should not hit this if running is false
 
-# 显示日志
-st.subheader("部署日志")
-st.code(st.session_state.logs, language="bash", height=300) # 增加高度方便查看
+# Display logs
+st.subheader("Deployment Logs")
+st.code(st.session_state.logs, language="bash", height=300)
 
-# 展示视频和图片 (保持不变)
+# Display videos and images (unchanged)
 video_paths = ["./meinv.mp4", "./mv2.mp4"]
 for path in video_paths:
     if os.path.exists(path):
@@ -124,4 +153,3 @@ for path in video_paths:
 image_path = "./mv.jpg"
 if os.path.exists(image_path):
     st.image(image_path, caption="南音", use_container_width=True)
-
