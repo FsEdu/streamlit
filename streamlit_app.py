@@ -16,7 +16,7 @@ if "running" not in st.session_state:
 if "auto_started" not in st.session_state:
     st.session_state.auto_started = False  # 控制是否已自动执行完
 
-st.title("🌐 Honey-Girl")
+st.title("🌐 Kelly-Troy")
 
 # 环境变量
 envs = {
