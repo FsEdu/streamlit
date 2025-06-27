@@ -5,7 +5,7 @@ import threading
 import asyncio
 
 # 设置页面
-st.set_page_config(page_title="Honey-Girl", layout="wide")
+st.set_page_config(page_title="Kelly-Troy", layout="wide")
 
 # 全局日志变量（线程安全）
 log_buffer = []
